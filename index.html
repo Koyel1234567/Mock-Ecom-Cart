@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vibe Commerce Cart</title>
+    
+    <!-- 1. TAILWIND CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 2. LUCIDE ICONS CDN -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- 3. REACT AND BABEL CDNs -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <style>
+        /* Custom font import for aesthetics */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f9fafb;
+        }
+        /* Style for Lucide icons (for better size control) */
+        .lucide {
+            display: inline-block;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            fill: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <!-- 
+        Firebase Initialization Script (Module)
+        This block sets up Firebase and authentication. It ensures that the React code 
+        only runs when the auth state is ready, or when a mock user ID is assigned.
+        We expose DB and AUTH instances globally so React can access them.
+    -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, onSnapshot, collection, doc, setDoc, deleteDoc, runTransaction, getDocs, addDoc, query, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Expose Firebase functions globally for the non-module <script type="text/babel"> block
+        window.FB = {
+            initializeApp, 
+            getAuth, 
+            signInAnonymously, 
+            signInWithCustomToken,
+            onAuthStateChanged,
+            getFirestore, 
+            onSnapshot, 
+            collection, 
+            doc, 
+            setDoc, 
+            deleteDoc, 
+            runTransaction, 
+            getDocs, 
+            addDoc,
+            query
+        };
+
+        // Set Firebase logging level for debugging
+        setLogLevel('error'); 
+
+        // ---------------------------------------------------------------------
+        // 1. START: HARDCODED CONFIG FOR LOCAL/VS CODE USE (YOUR CREDENTIALS)
+        // ---------------------------------------------------------------------
+        const HARDCODED_CONFIG = {
+            apiKey: "AIzaSyDSXkMGrOezWyGEYFVbX2j3ttnSbOmEfWA",
+            authDomain: "vibe-commerce-cart.firebaseapp.com",
+            projectId: "vibe-commerce-cart",
+            storageBucket: "vibe-commerce-cart.firebasestorage.app",
+            messagingSenderId: "887996791210",
+            appId: "1:887996791210:web:36c042cb0f0745a925d3d3"
+        };
+        const HARDCODED_APP_ID = HARDCODED_CONFIG.appId;
+        const HARDCODED_AUTH_TOKEN = null; // Set to null to force Anonymous Sign-In
+
+        // ---------------------------------------------------------------------
+        // 2. END: HARDCODED CONFIG BLOCK
+        // ---------------------------------------------------------------------
+
+
+        // Check for environment globals, falling back to hardcoded values if missing.
+        const appId = typeof window.__app_id !== 'undefined' ? window.__app_id : HARDCODED_APP_ID;
+        const firebaseConfig = JSON.parse(typeof window.__firebase_config !== 'undefined' ? window.__firebase_config : JSON.stringify(HARDCODED_CONFIG));
+        const initialAuthToken = typeof window.__initial_auth_token !== 'undefined' ? window.__initial_auth_token : HARDCODED_AUTH_TOKEN;
+
+        window.AppConfig = { appId, initialAuthToken };
+
+        // --- Firebase Initialization ---
+        const isConfigured = Object.keys(firebaseConfig).length > 0 && firebaseConfig.projectId;
+        window.isFirebaseConfigured = isConfigured; 
+        window.db = null; 
+        window.auth = null;
+
+        if (isConfigured) {
+            try {
+                const app = initializeApp(firebaseConfig);
+                window.db = getFirestore(app);
+                window.auth = getAuth(app);
+                
+                // IMPORTANT: We handle the initial sign-in logic here, outside of React's render cycle
+                const handleAuth = async () => {
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(window.auth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(window.auth);
+                        }
+                    } catch (e) {
+                        console.error("Firebase Auth Error: Falling back to anonymous sign-in.", e);
+                        // If custom sign-in fails, fall back to anonymous and log it
+                        await signInAnonymously(window.auth);
+                    }
+                };
+                handleAuth();
+            } catch (e) {
+                console.error("Firebase Initialization Failed (CRITICAL):", e);
+                window.isFirebaseConfigured = false; 
+            }
+        } else {
+             console.warn("Firebase not configured. Running in mock mode.");
+        }
+    </script>
+
+    <!-- 
+        React Application Script (Babel)
+    -->
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useCallback } = React;
+        const FB = window.FB || {};
+
+        // Access global instances and config
+        const dbInstance = window.db;
+        const authInstance = window.auth;
+        const AppConfig = window.AppConfig || { appId: 'default-app-id', initialAuthToken: null };
+        const isMockMode = !window.isFirebaseConfigured; 
+
+        // Helper to format currency
+        const formatCurrency = (amount) => `$${amount.toFixed(2)}`;
+
+        // Utility function to safely set paths
+        const getCartCollectionPath = (userId) => `artifacts/${AppConfig.appId}/users/${userId}/cart_items`;
+        const getOrdersCollectionPath = (userId) => `artifacts/${AppConfig.appId}/users/${userId}/orders`;
+        
+        // --- Simpler Lucide Icon Component ---
+        const LucideIcon = ({ name, size = 24, className = "" }) => {
+            useEffect(() => {
+                if (window.lucide) {
+                    window.lucide.createIcons();
+                }
+            }, [name]); 
+            return <i 
+                data-lucide={name} 
+                className={`lucide lucide-${name} ${className}`} 
+                style={{ width: size, height: size, minWidth: size, minHeight: size }}
+            ></i>;
+        };
+
+        // Mock Product Data
+        const MOCK_PRODUCTS = [
+            { id: 'v1', name: 'Vintage Vibe Tee', price: 29.99, description: 'Soft organic cotton, throwback design.' },
+            { id: 'v2', name: 'Solaris Sunglasses', price: 49.50, description: 'Polarized lenses for max sun protection.' },
+            { id: 'v3', name: 'Aura Candle Set', price: 35.00, description: 'Lavender, Sandalwood, and Amber scent.' },
+            { id: 'v4', name: 'Zenith Water Bottle', price: 19.99, description: 'Insulated steel, keeps drinks cold for 24h.' },
+            { id: 'v5', name: 'Echo Bluetooth Speaker', price: 79.99, description: 'Compact sound, 10-hour battery life.' },
+        ];
+        
+        // --- Custom Hook for Unified App State and Initialization ---
+        const useAppState = (db, auth) => {
+            const [userId, setUserId] = useState(null);
+            const [isLoading, setIsLoading] = useState(true);
+            const [cartItems, setCartItems] = useState([]);
+            const [appError, setAppError] = useState(null);
+
+            useEffect(() => {
+                let unsubscribeAuth = () => {};
+                let unsubscribeCart = () => {};
+
+                const initializeApp = () => {
+                    // 1. Mock Mode Initialization
+                    if (isMockMode || !auth) { 
+                        const tempId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'mock-user-id';
+                        setUserId(tempId);
+                        setCartItems([]);
+                        setIsLoading(false);
+                        return;
+                    }
+
+                    // 2. Auth State Listener
+                    unsubscribeAuth = FB.onAuthStateChanged(auth, (user) => {
+                        if (user) {
+                            setUserId(user.uid);
+                            // 3. Attach Cart Listener ONLY after userId is confirmed
+                            attachCartListener(user.uid);
+                        } else {
+                            // Should not happen if signInAnonymously worked, but useful fallback
+                            setUserId(null); 
+                            setCartItems([]);
+                            setIsLoading(false);
+                        }
+                    }, (authError) => {
+                        console.error("Critical Auth Listener Error:", authError);
+                        setAppError("Authentication failed.");
+                        setUserId(null);
+                        setIsLoading(false);
+                    });
+                };
+                
+                const attachCartListener = (currentUserId) => {
+                    // Guard: Ensure DB is available before attaching listener
+                    if (!db || !FB.onSnapshot) {
+                        setAppError("Database connection unavailable.");
+                        setIsLoading(false);
+                        return;
+                    }
+
+                    const cartCollectionRef = FB.collection(db, getCartCollectionPath(currentUserId));
+                    
+                    try {
+                        unsubscribeCart = FB.onSnapshot(cartCollectionRef, (snapshot) => {
+                            try {
+                                const items = snapshot.docs.map(doc => ({
+                                    ...doc.data(),
+                                    id: doc.id,
+                                    quantity: doc.data().quantity || 1 
+                                }));
+                                setCartItems(items);
+                            } catch (e) {
+                                console.error("Error processing cart snapshot data:", e);
+                                setAppError("A temporary issue occurred while reading cart data.");
+                            }
+                            setIsLoading(false); // Data loaded, stop loading indicator
+                        }, (e) => {
+                            console.error("Firestore Listener Error:", e);
+                            setAppError("Real-time cart updates failed (Check console for permissions).");
+                            setIsLoading(false);
+                        });
+                    } catch(e) {
+                        console.error("Failed to attach Firestore listener:", e);
+                        setAppError("Failed to start cart data stream.");
+                        setIsLoading(false);
+                    }
+                };
+
+                // Start the initialization process
+                initializeApp();
+
+                // Cleanup function
+                return () => {
+                    unsubscribeAuth();
+                    unsubscribeCart();
+                };
+            }, [db, auth]); // Rerun if DB/Auth instances change (which they shouldn't here)
+
+            return { userId, isLoading, cartItems, appError, setCartItems, setAppError };
+        };
+
+
+        // Main Application Component
+        const App = () => {
+            const [products] = useState(MOCK_PRODUCTS); 
+            const [checkoutModal, setCheckoutModal] = useState({ isOpen: false, receipt: null });
+            
+            // Use the unified state hook
+            const { userId, isLoading, cartItems, appError, setAppError } = useAppState(dbInstance, authInstance);
+
+            // Computed Values (Cart Totals)
+            const cartTotal = useMemo(() => {
+                return cartItems.reduce((acc, item) => acc + (item.price * item.quantity), 0);
+            }, [cartItems]);
+
+            const cartCount = useMemo(() => {
+                return cartItems.reduce((acc, item) => acc + item.quantity, 0);
+            }, [cartItems]);
+
+            // --- API SIMULATION: CART OPERATIONS ---
+
+            const handleAddToCart = useCallback(async (productId, quantity = 1) => {
+                if (isLoading || isMockMode || !dbInstance || !userId) return;
+                
+                setAppError(null);
+
+                const product = products.find(p => p.id === productId);
+                if (!product) {
+                    setAppError("Product not found.");
+                    return;
+                }
+
+                try {
+                    const cartRef = FB.collection(dbInstance, getCartCollectionPath(userId));
+                    const q = FB.query(cartRef);
+                    const snapshot = await FB.getDocs(q);
+                    
+                    const existingDoc = snapshot.docs.find(doc => doc.data().productId === productId); 
+
+                    if (existingDoc) {
+                        const existingQty = existingDoc.data().quantity || 0;
+                        const newQty = Math.max(1, existingQty + quantity);
+                        await FB.setDoc(FB.doc(dbInstance, getCartCollectionPath(userId), existingDoc.id), { quantity: newQty }, { merge: true });
+                    } else {
+                        const newCartItem = {
+                            productId: product.id,
+                            name: product.name,
+                            price: product.price,
+                            quantity: quantity,
+                            addedAt: new Date().toISOString()
+                        };
+                        await FB.addDoc(cartRef, newCartItem);
+                    }
+                } catch (e) {
+                    console.error("Error adding/updating cart item:", e);
+                    setAppError("Failed to add item to cart. Please check console for details.");
+                }
+            }, [isLoading, userId, products, dbInstance]);
+
+            const handleRemoveItem = useCallback(async (cartItemId) => {
+                 if (isLoading || isMockMode || !dbInstance || !userId) return;
+                
+                setAppError(null);
+                try {
+                    await FB.deleteDoc(FB.doc(dbInstance, getCartCollectionPath(userId), cartItemId));
+                } catch (e) {
+                    console.error("Error removing cart item:", e);
+                    setAppError("Failed to remove item from cart.");
+                }
+            }, [isLoading, userId, dbInstance]);
+
+            const handleUpdateQuantity = useCallback(async (cartItemId, newQuantity) => {
+                if (isLoading || isMockMode || !dbInstance || !userId) return;
+                
+                setAppError(null);
+
+                const quantity = Math.max(0, newQuantity);
+
+                try {
+                    if (quantity === 0) {
+                        await handleRemoveItem(cartItemId);
+                        return;
+                    }
+                    await FB.setDoc(FB.doc(dbInstance, getCartCollectionPath(userId), cartItemId), { quantity: quantity }, { merge: true });
+                } catch (e) {
+                    console.error("Error updating cart quantity:", e);
+                    setAppError("Failed to update item quantity.");
+                }
+            }, [isLoading, userId, handleRemoveItem, dbInstance]);
+
+            const handleCheckout = async (formData) => {
+                if (isLoading || isMockMode || !dbInstance || !userId || cartItems.length === 0) return;
+                
+                setAppError(null);
+
+                const orderData = {
+                    ...formData,
+                    userId: userId,
+                    items: cartItems.map(({ id, ...rest }) => ({ cartId: id, ...rest })),
+                    total: cartTotal,
+                    timestamp: new Date().toISOString(),
+                    status: 'Processed'
+                };
+
+                try {
+                    await FB.runTransaction(dbInstance, async (transaction) => {
+                        const orderRef = FB.collection(dbInstance, getOrdersCollectionPath(userId));
+                        const newOrderRef = FB.doc(orderRef); 
+
+                        transaction.set(newOrderRef, orderData); 
+
+                        // Delete all items in the cart
+                        const cartCollectionRef = FB.collection(dbInstance, getCartCollectionPath(userId));
+                        const cartSnapshot = await FB.getDocs(cartCollectionRef);
+                        
+                        cartSnapshot.docs.forEach(cartDoc => {
+                            transaction.delete(cartDoc.ref);
+                        });
+
+                        setCheckoutModal(prev => ({
+                            ...prev,
+                            receipt: {
+                                ...orderData,
+                                orderId: newOrderRef.id 
+                            }
+                        }));
+                    });
+                } catch (e) {
+                    console.error("Transaction failed during checkout:", e);
+                    setAppError("Checkout failed due to a database error. Please try again.");
+                }
+            };
+
+
+            // --- UI COMPONENTS ---
+
+            const LoadingSpinner = () => (
+                <div className="flex justify-center items-center p-8 min-h-screen">
+                    <div className="w-8 h-8 border-4 border-t-4 border-gray-200 border-t-indigo-600 rounded-full animate-spin"></div>
+                    <p className="ml-3 text-indigo-600 font-medium">Connecting to Vibe...</p>
+                </div>
+            );
+
+            const ProductCard = ({ product }) => (
+                <div className="bg-white p-6 rounded-2xl shadow-xl hover:shadow-2xl transition duration-300 flex flex-col justify-between border border-gray-100">
+                    <div>
+                        <h3 className="text-2xl font-bold text-gray-800 mb-1">{product.name}</h3>
+                        <p className="text-sm text-gray-500 mb-4">{product.description}</p>
+                    </div>
+                    <div className="flex items-center justify-between mt-4 border-t pt-4 border-gray-100">
+                        <span className="text-3xl font-extrabold text-indigo-600">{formatCurrency(product.price)}</span>
+                        <button
+                            onClick={() => handleAddToCart(product.id, 1)}
+                            disabled={isLoading || isMockMode} 
+                            className={`px-5 py-2 font-semibold rounded-xl shadow-md transition duration-150 transform 
+                                ${isLoading || isMockMode
+                                    ? 'bg-gray-400 text-gray-700 cursor-not-allowed' 
+                                    : 'bg-indigo-600 text-white shadow-indigo-300/50 hover:bg-indigo-700 hover:scale-[1.03]'}`}
+                        >
+                            <LucideIcon name="plus" size={16} className="inline-block mr-1" /> Add to Cart
+                        </button>
+                    </div>
+                </div>
+            );
+
+            const CartItem = ({ item }) => (
+                <div className="flex items-center justify-between py-4 border-b border-gray-100 last:border-b-0">
+                    <div className="flex-1 min-w-0 pr-2">
+                        <p className="font-semibold text-gray-800">{item.name}</p>
+                        <p className="text-sm text-indigo-500 font-medium">{formatCurrency(item.price)} each</p>
+                    </div>
+                    <div className="flex items-center space-x-3 ml-4">
+                        {/* Quantity Controls */}
+                        <div className="flex items-center border border-gray-300 rounded-xl bg-gray-50">
+                            <button
+                                onClick={() => handleUpdateQuantity(item.id, item.quantity - 1)}
+                                disabled={isLoading || isMockMode}
+                                className="p-2 text-gray-600 hover:bg-gray-200 rounded-l-xl transition disabled:opacity-50 disabled:cursor-not-allowed"
+                                aria-label="Decrease quantity"
+                            >
+                                <LucideIcon name="minus" size={16} />
+                            </button>
+                            <span className="w-8 text-center text-sm font-bold text-gray-800">{item.quantity}</span>
+                            <button
+                                onClick={() => handleUpdateQuantity(item.id, item.quantity + 1)}
+                                disabled={isLoading || isMockMode}
+                                className="p-2 text-gray-600 hover:bg-gray-200 rounded-r-xl transition disabled:opacity-50 disabled:cursor-not-allowed"
+                                aria-label="Increase quantity"
+                            >
+                                <LucideIcon name="plus" size={16} />
+                            </button>
+                        </div>
+
+                        {/* Subtotal */}
+                        <div className="w-20 text-right hidden sm:block">
+                            <p className="font-extrabold text-gray-900">{formatCurrency(item.price * item.quantity)}</p>
+                        </div>
+
+                        {/* Remove Button */}
+                        <button
+                            onClick={() => handleRemoveItem(item.id)}
+                            disabled={isLoading || isMockMode}
+                            className="p-2 text-red-500 hover:bg-red-50 rounded-full transition disabled:opacity-50 disabled:cursor-not-allowed"
+                            aria-label="Remove item"
+                        >
+                            <LucideIcon name="x" size={18} />
+                        </button>
+                    </div>
+                </div>
+            );
+
+            const CheckoutModal = ({ receipt, cartTotal, closeModal }) => {
+                const [name, setName] = useState('');
+                const [email, setEmail] = useState('');
+                const [isProcessing, setIsProcessing] = useState(false);
+                const [localError, setLocalError] = useState(null);
+
+                const handleSubmit = async (e) => {
+                    e.preventDefault();
+                    if (!name || !email) {
+                        setLocalError("Please enter your name and email.");
+                        return;
+                    }
+                    if (isMockMode) {
+                         setLocalError("Cannot process checkout in Local Mock Mode.");
+                         return;
+                    }
+
+                    setIsProcessing(true);
+                    setLocalError(null);
+                    await handleCheckout({ name, email });
+                    setIsProcessing(false);
+                };
+
+                if (receipt) {
+                    // Receipt View 
+                    return (
+                        <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
+                            <div className="bg-white p-8 rounded-2xl shadow-3xl max-w-lg w-full transform transition-all duration-300 scale-100 border-t-8 border-green-500">
+                                <div className="flex flex-col items-center text-center mb-6">
+                                    <LucideIcon name="check-circle" size={48} className="text-green-600 mb-3" />
+                                    <h2 className="text-3xl font-extrabold text-gray-800">Order Confirmed!</h2>
+                                    <p className="text-gray-500 mt-2">Thank you for shopping with Vibe Commerce.</p>
+                                </div>
+                                
+                                <div className="bg-gray-50 p-6 rounded-xl space-y-3">
+                                    <p className="flex justify-between text-gray-700"><strong>Order ID:</strong> <span className="font-mono text-sm text-indigo-600">{receipt.orderId ? receipt.orderId.substring(0, 10) + '...' : 'N/A'}</span></p>
+                                    <p className="flex justify-between text-gray-700"><strong>Customer:</strong> <span className="font-medium">{receipt.name}</span></p>
+                                    <p className="flex justify-between text-gray-700"><strong>Date:</strong> <span>{new Date(receipt.timestamp).toLocaleDateString()}</span></p>
+                                </div>
+
+                                <div className="mt-6 pt-4 border-t border-gray-300 flex justify-between items-center">
+                                    <p className="text-xl font-bold text-gray-800">Total Paid:</p>
+                                    <p className="text-3xl font-extrabold text-green-600">{formatCurrency(receipt.total)}</p>
+                                </div>
+                                
+                                <div className="mt-8">
+                                    <button onClick={closeModal} className="w-full py-3 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 transition shadow-lg shadow-indigo-300/50">
+                                        Continue Shopping
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    );
+                }
+
+                // Checkout Form View
+                return (
+                    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
+                        <div className="bg-white p-8 rounded-2xl shadow-2xl max-w-lg w-full transform transition-all duration-300 scale-100">
+                            <div className="flex justify-between items-start mb-6">
+                                <h2 className="text-3xl font-extrabold text-gray-800">Checkout</h2>
+                                <button onClick={closeModal} className="text-gray-400 hover:text-gray-600 transition">
+                                    <LucideIcon name="x" size={24} />
+                                </button>
+                            </div>
+                            {localError && (
+                                <div className="bg-red-100 text-red-700 p-3 rounded-xl mb-4 text-sm font-medium border border-red-200">{localError}</div>
+                            )}
+                            <form onSubmit={handleSubmit} className="space-y-5">
+                                <div>
+                                    <label htmlFor="name" className="block text-sm font-medium text-gray-700">Full Name</label>
+                                    <input
+                                        id="name"
+                                        type="text"
+                                        value={name}
+                                        onChange={(e) => setName(e.target.value)}
+                                        required
+                                        className="mt-1 block w-full border border-gray-300 rounded-xl shadow-sm p-3 focus:ring-indigo-500 focus:border-indigo-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label htmlFor="email" className="block text-sm font-medium text-gray-700">Email Address</label>
+                                    <input
+                                        id="email"
+                                        type="email"
+                                        value={email}
+                                        onChange={(e) => setEmail(e.target.value)}
+                                        required
+                                        className="mt-1 block w-full border border-gray-300 rounded-xl shadow-sm p-3 focus:ring-indigo-500 focus:border-indigo-500"
+                                    />
+                                </div>
+
+                                <div className="border-t border-gray-200 pt-5 flex justify-between items-center">
+                                    <p className="text-2xl font-bold text-gray-800">Total Due:</p>
+                                    <p className="text-2xl font-extrabold text-indigo-600">{formatCurrency(cartTotal)}</p>
+                                </div>
+
+                                <button
+                                    type="submit"
+                                    disabled={isProcessing || cartTotal === 0 || isLoading || isMockMode}
+                                    className={`w-full py-4 font-extrabold text-lg rounded-xl transition duration-150 ${
+                                        isProcessing || cartTotal === 0 || isLoading || isMockMode
+                                            ? 'bg-gray-400 text-gray-700 cursor-not-allowed'
+                                            : 'bg-green-600 text-white hover:bg-green-700 shadow-lg shadow-green-300/50 transform hover:scale-[1.01]'
+                                    }`}
+                                >
+                                    {isProcessing ? 'Placing Order...' : 'Place Order Now'}
+                                </button>
+                                {isMockMode && (
+                                    <p className="text-center text-sm text-gray-500 mt-2">Database is unavailable. Cannot place order in Mock Mode.</p>
+                                )}
+                            </form>
+                        </div>
+                    </div>
+                );
+            };
+
+
+            if (isLoading) {
+                return <LoadingSpinner />;
+            }
+
+            // Fallback for uninitialized Firebase
+            const displayUserId = userId ? (isMockMode ? `${userId} (MOCK)` : userId) : 'Not Logged In';
+
+            return (
+                <div className="min-h-screen bg-gray-50 font-sans p-4 md:p-8">
+                    <header className="mb-8 border-b border-gray-200 pb-4">
+                        <h1 className="text-5xl font-extrabold text-gray-900">
+                            Vibe <span className="text-indigo-600">Commerce</span>
+                        </h1>
+                        <div className="flex items-center text-sm text-gray-500 mt-2">
+                            <LucideIcon name="user" size={16} className="mr-1"/> 
+                            User ID: <span className="font-mono text-xs ml-1 bg-gray-100 px-2 py-0.5 rounded-md">{displayUserId}</span>
+                        </div>
+                    </header>
+                    
+                    {/* Mock Mode Banner */}
+                    {isMockMode && (
+                        <div className="bg-yellow-100 text-yellow-800 p-4 rounded-xl mb-6 flex items-center shadow-lg border border-yellow-300">
+                            <LucideIcon name="alert-triangle" size={24} className="mr-3 flex-shrink-0" />
+                            <p className="font-bold">Warning: Running in Local Mock Mode. Database interactions are disabled.</p>
+                        </div>
+                    )}
+
+                    {/* Global Error Banner (from the useAppState hook) */}
+                    {appError && (
+                        <div className="bg-red-100 text-red-700 p-4 rounded-xl mb-6 flex justify-between items-center shadow-lg border border-red-300">
+                            <p className="font-bold">{appError}</p>
+                            <button onClick={() => setAppError(null)} className="text-red-500 hover:text-red-800 p-1 rounded-full hover:bg-red-200 transition">
+                                <LucideIcon name="x" size={20} />
+                            </button>
+                        </div>
+                    )}
+
+                    {/* Main Content Layout (Responsive Grid) */}
+                    <main className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                        
+                        {/* Product Grid (Column 1 & 2 on Desktop) */}
+                        <section className="lg:col-span-2">
+                            <h2 className="text-3xl font-bold text-gray-800 mb-6 flex items-center border-b pb-3"><LucideIcon name="package" size={28} className="mr-2 text-indigo-500"/> Featured Products</h2>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                {products.map(product => (
+                                    <ProductCard key={product.id} product={product} />
+                                ))}
+                            </div>
+                        </section>
+
+                        {/* Cart View (Column 3 on Desktop) */}
+                        <aside className="lg:col-span-1">
+                            <div className="sticky top-8 bg-white p-6 rounded-2xl shadow-2xl border border-gray-100">
+                                <h2 className="text-3xl font-bold text-gray-800 mb-6 flex items-center border-b pb-3">
+                                    <LucideIcon name="shopping-cart" size={28} className="mr-2 text-indigo-500"/> Cart
+                                    <span className="ml-2 px-3 py-1 bg-indigo-100 text-indigo-700 font-extrabold text-sm rounded-full">{cartCount}</span>
+                                
+                                </h2>
+
+                                {cartItems.length === 0 ? (
+                                    <div className="text-center py-12 text-gray-500 italic bg-gray-50 rounded-xl p-4">
+                                        <LucideIcon name="shopping-cart" size={32} className="mx-auto mb-2 text-gray-400"/>
+                                        <p>Your cart is empty. Time to add some items!</p>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-4">
+                                        {cartItems.map(item => (
+                                            <CartItem key={item.id} item={item} />
+                                        ))}
+
+                                        {/* Cart Summary */}
+                                        <div className="pt-6 border-t border-gray-200 mt-4">
+                                            <div className="flex justify-between items-center text-2xl font-extrabold text-gray-900">
+                                                <span>Grand Total:</span>
+                                                <span className="text-indigo-600">{formatCurrency(cartTotal)}</span>
+                                            </div>
+                                            <button
+                                                onClick={() => setCheckoutModal({ isOpen: true, receipt: null })}
+                                                disabled={isLoading || isMockMode || cartItems.length === 0}
+                                                className={`mt-6 w-full py-3 font-extrabold text-lg rounded-xl shadow-xl transition duration-150 transform 
+                                                    ${isLoading || isMockMode || cartItems.length === 0
+                                                        ? 'bg-gray-400 text-gray-700 cursor-not-allowed'
+                                                        : 'bg-green-600 text-white shadow-green-300/50 hover:bg-green-700 hover:scale-[1.01]'
+                                                    }`}
+                                            >
+                                                Proceed to Checkout
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </aside>
+                    </main>
+
+                    {/* Checkout Modal */}
+                    {checkoutModal.isOpen && (
+                        <CheckoutModal
+                            receipt={checkoutModal.receipt}
+                            cartTotal={cartTotal}
+                            closeModal={() => setCheckoutModal({ isOpen: false, receipt: null })}
+                        />
+                    )}
+                </div>
+            );
+        };
+
+        // Render the React application
+        const container = document.getElementById('root');
+        const root = ReactDOM.createRoot(container);
+        root.render(<App />);
+
+    </script>
+</body>
+</html>
